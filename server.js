@@ -1,6 +1,5 @@
 // ══════════════════════════════════════════════════════════════
 //  SERVEUR TEMPS RÉEL — Emploi pour Tous
-//  Stack : Node.js + Express + Socket.io
 // ══════════════════════════════════════════════════════════════
 
 const express    = require("express");
@@ -12,29 +11,25 @@ const app    = express();
 const server = http.createServer(app);
 const PORT   = process.env.PORT || 4000;
 
-// ── CORS ─────────────────────────────────────────────────────
-const ALLOWED_ORIGINS = [
-  process.env.CLIENT_URL || "https://emploi-web.vercel.app",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "*"
-];
-
 app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 
 // ── Socket.io ─────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET","POST"], credentials: true }
+  cors: { origin: "*", methods: ["GET","POST"], credentials: true },
+  // ✅ Timeouts plus longs pour réseau mobile instable
+  pingTimeout:  60000,
+  pingInterval: 25000,
 });
 
-// ── Route de test ─────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "✅ Serveur Emploi pour Tous opérationnel" });
 });
 
 // ── Stockage en mémoire ───────────────────────────────────────
-const connectedUsers = new Map();
+const connectedUsers  = new Map();
+// ✅ File d'attente pour messages quand destinataire est hors ligne
+const pendingMessages = {};
 
 const findSocket = (name) => {
   for (const [, user] of connectedUsers) {
@@ -48,11 +43,30 @@ io.on("connection", (socket) => {
   const { userId, name } = socket.handshake.auth;
   if (!name) return;
 
+  // ✅ Supprimer l'ancienne session du même user (reconnexion mobile)
+  for (const [sid, user] of connectedUsers) {
+    if (user.name === name && sid !== socket.id) {
+      connectedUsers.delete(sid);
+    }
+  }
+
   connectedUsers.set(socket.id, { userId, name, socketId: socket.id });
   console.log(`✅ Connecté : ${name} — ${connectedUsers.size} en ligne`);
-
-  // Notifier tout le monde
   io.emit("user_online", { name, online: true });
+
+  // ✅ Livrer les messages en attente dès la reconnexion
+  if (pendingMessages[name]?.length > 0) {
+    console.log(`📬 Livraison de ${pendingMessages[name].length} msg(s) en attente pour ${name}`);
+    pendingMessages[name].forEach((item) => {
+      socket.emit("message", item.payload);
+      socket.emit("notification", {
+        id: Date.now(), type: "message",
+        msg: `💬 Nouveau message de ${item.payload.from}`,
+        from: item.payload.from, time: "À l'instant", read: false,
+      });
+    });
+    delete pendingMessages[name];
+  }
 
   // ── Réception d'un message ────────────────────────────────
   socket.on("message", (data) => {
@@ -64,38 +78,34 @@ io.on("connection", (socket) => {
 
     const destSocketId = findSocket(to);
     if (destSocketId) {
-      // Envoyer le message au destinataire
       io.to(destSocketId).emit("message", payload);
-      // Accusé de réception
       socket.emit("msg_status", { msgId: id, status: "delivered" });
-      // Notification bannière
       io.to(destSocketId).emit("notification", {
-        id:   Date.now(),
-        type: "message",
-        msg:  `💬 Nouveau message de ${from}`,
-        from: from,
-        time: "À l'instant",
-        read: false,
+        id: Date.now(), type: "message",
+        msg: `💬 Nouveau message de ${from}`,
+        from, time: "À l'instant", read: false,
       });
     } else {
+      // ✅ Mettre en file si destinataire hors ligne → livré à la reconnexion
+      if (!pendingMessages[to]) pendingMessages[to] = [];
+      pendingMessages[to].push({ payload, from });
       socket.emit("msg_status", { msgId: id, status: "sent" });
-      console.log(`📭 ${to} est hors ligne`);
+      console.log(`📭 ${to} hors ligne — message en attente (${pendingMessages[to].length} en file)`);
     }
 
     console.log(`💬 ${from} → ${to} : ${msgData.text?.slice(0,40) || "(fichier)"}`);
+  });
+
+  // ── Nouvelle offre → broadcast à tous ─────────────────────
+  socket.on("new_job", (job) => {
+    console.log(`📢 Nouvelle offre de ${name} : ${job.title}`);
+    socket.broadcast.emit("new_job", job);
   });
 
   // ── Statut message ─────────────────────────────────────────
   socket.on("msg_status", ({ msgId, status, to }) => {
     const dest = findSocket(to);
     if (dest) io.to(dest).emit("msg_status", { msgId, status });
-  });
-
-  // ── Nouvelle offre → broadcast à tous ─────────────────────
-  socket.on("new_job", (job) => {
-    console.log(`📢 Nouvelle offre de ${name} : ${job.title}`);
-    // Envoyer à tous les autres clients connectés
-    socket.broadcast.emit("new_job", job);
   });
 
   // ── Typing indicator ───────────────────────────────────────
@@ -112,8 +122,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// ── Démarrage ─────────────────────────────────────────────────
 server.listen(PORT, () => {
-  console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}`);
-  console.log(`   Prêt pour les connexions Socket.io\n`);
+  console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}\n`);
 });
