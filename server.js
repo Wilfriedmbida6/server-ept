@@ -1,48 +1,41 @@
 // ══════════════════════════════════════════════════════════════
 //  SERVEUR TEMPS RÉEL — Emploi pour Tous
 //  Stack : Node.js + Express + Socket.io
-//
-//  INSTALLATION :
-//    npm install express socket.io cors
-//
-//  LANCEMENT LOCAL :
-//    node server.js
-//
-//  MISE EN LIGNE (Railway / Render / Fly.io) :
-//    - Créer un projet, connecter ce fichier
-//    - Variable d'environnement : PORT (automatique sur ces plateformes)
 // ══════════════════════════════════════════════════════════════
 
-const express   = require("express");
-const http      = require("http");
-const { Server }= require("socket.io");
-const cors      = require("cors");
+const express    = require("express");
+const http       = require("http");
+const { Server } = require("socket.io");
+const cors       = require("cors");
 
 const app    = express();
 const server = http.createServer(app);
 const PORT   = process.env.PORT || 4000;
 
-// ── CORS : autoriser votre domaine frontend ──────────────────
-const io = new Server(server, {
-  cors: {
-    origin: "*", // ← En production, remplacer par votre URL ex: "https://monapp.vercel.app"
-    methods: ["GET", "POST"]
-  }
-});
+// ── CORS ─────────────────────────────────────────────────────
+const ALLOWED_ORIGINS = [
+  process.env.CLIENT_URL || "https://emploi-web.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "*"
+];
 
-app.use(cors());
+app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 
-// ── Route de test ────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "Serveur Emploi pour Tous opérationnel ✅" });
+// ── Socket.io ─────────────────────────────────────────────────
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET","POST"], credentials: true }
 });
 
-// ── Stockage en mémoire des utilisateurs connectés ──────────
-// Structure : { socketId: { userId, name, socketId } }
+// ── Route de test ─────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.json({ status: "ok", message: "✅ Serveur Emploi pour Tous opérationnel" });
+});
+
+// ── Stockage en mémoire ───────────────────────────────────────
 const connectedUsers = new Map();
 
-// Trouver le socketId d'un utilisateur par son nom
 const findSocket = (name) => {
   for (const [, user] of connectedUsers) {
     if (user.name === name) return user.socketId;
@@ -50,58 +43,58 @@ const findSocket = (name) => {
   return null;
 };
 
-// ── Socket.io : gestion des connexions ───────────────────────
+// ── Connexions Socket.io ──────────────────────────────────────
 io.on("connection", (socket) => {
   const { userId, name } = socket.handshake.auth;
+  if (!name) return;
 
-  // Enregistrer l'utilisateur
   connectedUsers.set(socket.id, { userId, name, socketId: socket.id });
-  console.log(`✅ Connecté : ${name} (${socket.id}) — ${connectedUsers.size} en ligne`);
+  console.log(`✅ Connecté : ${name} — ${connectedUsers.size} en ligne`);
 
-  // Notifier tout le monde qu'un utilisateur est en ligne
+  // Notifier tout le monde
   io.emit("user_online", { name, online: true });
 
-  // ── Réception d'un message ─────────────────────────────────
+  // ── Réception d'un message ────────────────────────────────
   socket.on("message", (data) => {
-    // data = { to, text, msgId, isVoice, voiceUrl, voiceDur, fileUrl, fileName, fileType }
     const { to, ...msgData } = data;
-
-    const time  = new Date().toLocaleTimeString("fr", { hour: "2-digit", minute: "2-digit" });
-    const id    = msgData.msgId || Date.now();
-    const from  = name;
-
+    const time    = new Date().toLocaleTimeString("fr", { hour:"2-digit", minute:"2-digit" });
+    const id      = msgData.msgId || Date.now();
+    const from    = name;
     const payload = { ...msgData, id, from, time };
 
-    // Envoyer au destinataire
     const destSocketId = findSocket(to);
     if (destSocketId) {
+      // Envoyer le message au destinataire
       io.to(destSocketId).emit("message", payload);
-      // Accuser réception "delivered" à l'expéditeur
+      // Accusé de réception
       socket.emit("msg_status", { msgId: id, status: "delivered" });
+      // Notification bannière
+      io.to(destSocketId).emit("notification", {
+        id:   Date.now(),
+        type: "message",
+        msg:  `💬 Nouveau message de ${from}`,
+        from: from,
+        time: "À l'instant",
+        read: false,
+      });
     } else {
-      // Destinataire hors ligne
       socket.emit("msg_status", { msgId: id, status: "sent" });
-      console.log(`📭 ${to} est hors ligne — message en attente`);
-      // TODO: stocker en base de données pour livraison différée
+      console.log(`📭 ${to} est hors ligne`);
     }
 
-    console.log(`💬 ${from} → ${to} : ${msgData.text?.slice(0,40) || "(fichier/vocal)"}`);
+    console.log(`💬 ${from} → ${to} : ${msgData.text?.slice(0,40) || "(fichier)"}`);
   });
 
-  // ── Statut message (delivered → read) ─────────────────────
+  // ── Statut message ─────────────────────────────────────────
   socket.on("msg_status", ({ msgId, status, to }) => {
-    const destSocketId = findSocket(to);
-    if (destSocketId) {
-      io.to(destSocketId).emit("msg_status", { msgId, status });
-    }
+    const dest = findSocket(to);
+    if (dest) io.to(dest).emit("msg_status", { msgId, status });
   });
 
-  // ── Indicateur "en train d'écrire" ────────────────────────
+  // ── Typing indicator ───────────────────────────────────────
   socket.on("typing", ({ to, typing }) => {
-    const destSocketId = findSocket(to);
-    if (destSocketId) {
-      io.to(destSocketId).emit("typing", { from: name, typing });
-    }
+    const dest = findSocket(to);
+    if (dest) io.to(dest).emit("typing", { from: name, typing });
   });
 
   // ── Déconnexion ────────────────────────────────────────────
@@ -115,6 +108,5 @@ io.on("connection", (socket) => {
 // ── Démarrage ─────────────────────────────────────────────────
 server.listen(PORT, () => {
   console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}`);
-  console.log(`   Mode : ${process.env.NODE_ENV || "développement"}`);
   console.log(`   Prêt pour les connexions Socket.io\n`);
 });
