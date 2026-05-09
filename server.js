@@ -91,6 +91,13 @@ io.on("connection", (socket) => {
     if (dest) io.to(dest).emit("msg_status", { msgId, status });
   });
 
+  // ── Nouvelle offre → broadcast à tous ─────────────────────
+  socket.on("new_job", (job) => {
+    console.log(`📢 Nouvelle offre de ${name} : ${job.title}`);
+    // Envoyer à tous les autres clients connectés
+    socket.broadcast.emit("new_job", job);
+  });
+
   // ── Typing indicator ───────────────────────────────────────
   socket.on("typing", ({ to, typing }) => {
     const dest = findSocket(to);
