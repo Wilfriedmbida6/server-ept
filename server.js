@@ -32,15 +32,17 @@ const connectedUsers  = new Map();
 const pendingMessages = {};
 
 const findSocket = (name) => {
+  if (!name) return null;
   for (const [, user] of connectedUsers) {
-    if (user.name === name) return user.socketId;
+    if (user.name?.toLowerCase() === name?.toLowerCase()) return user.socketId;
   }
   return null;
 };
 
 // ── Connexions Socket.io ──────────────────────────────────────
 io.on("connection", (socket) => {
-  const { userId, name } = socket.handshake.auth;
+  const { userId } = socket.handshake.auth;
+  const name = socket.handshake.auth.name?.trim(); // ✅ Supprimer espaces
   if (!name) return;
 
   // ✅ Supprimer l'ancienne session du même user (reconnexion mobile)
@@ -52,7 +54,24 @@ io.on("connection", (socket) => {
 
   connectedUsers.set(socket.id, { userId, name, socketId: socket.id });
   console.log(`✅ Connecté : ${name} — ${connectedUsers.size} en ligne`);
+  // ✅ Broadcast avec le nom exact stocké (pour debug casse)
   io.emit("user_online", { name, online: true });
+  // ✅ Livrer les messages en attente
+  if (pendingMessages[name]?.length > 0) {
+    pendingMessages[name].forEach(item => {
+      socket.emit("message", item.payload);
+    });
+    delete pendingMessages[name];
+    console.log(`📬 Messages en attente livrés à ${name}`);
+  } else {
+    // Chercher aussi avec casse différente
+    const key = Object.keys(pendingMessages).find(k => k.toLowerCase() === name.toLowerCase());
+    if (key && pendingMessages[key]?.length > 0) {
+      pendingMessages[key].forEach(item => socket.emit("message", item.payload));
+      delete pendingMessages[key];
+      console.log(`📬 Messages en attente livrés à ${name} (clé: ${key})`);
+    }
+  }
 
   // ✅ Livrer les messages en attente dès la reconnexion
   if (pendingMessages[name]?.length > 0) {
