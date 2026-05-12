@@ -14,61 +14,54 @@ const PORT   = process.env.PORT || 4000;
 app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 
-// ── Socket.io ─────────────────────────────────────────────────
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET","POST"], credentials: true },
-  // ✅ Timeouts plus longs pour réseau mobile instable
-  pingTimeout:  60000,
-  pingInterval: 25000,
+  cors: { origin: "*", methods: ["GET","POST"], credentials: true }
 });
 
+// Route test
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "✅ Serveur Emploi pour Tous opérationnel" });
+  res.json({ status: "ok", message: "Serveur Emploi pour Tous operationnel" });
 });
 
-// ── Stockage en mémoire ───────────────────────────────────────
-const connectedUsers  = new Map();
-// ✅ File d'attente pour messages quand destinataire est hors ligne
-const pendingMessages = {};
+// Route debug - voir connectes
+app.get("/users", (req, res) => {
+  const list = [];
+  connectedUsers.forEach((u) => list.push({ name: u.name, userId: u.userId }));
+  res.json({ count: list.length, users: list });
+});
 
-const findSocket = (name) => {
+const connectedUsers = new Map();
+
+// Chercher par nom (insensible casse) OU userId
+const findSocket = (nameOrId) => {
   for (const [, user] of connectedUsers) {
-    if (user.name === name) return user.socketId;
+    if (
+      user.name?.toLowerCase() === nameOrId?.toLowerCase() ||
+      user.userId === nameOrId
+    ) return user.socketId;
   }
   return null;
 };
 
-// ── Connexions Socket.io ──────────────────────────────────────
 io.on("connection", (socket) => {
   const { userId, name } = socket.handshake.auth;
   if (!name) return;
 
-  // ✅ Supprimer l'ancienne session du même user (reconnexion mobile)
+  // Supprimer ancien socket du meme user
   for (const [sid, user] of connectedUsers) {
-    if (user.name === name && sid !== socket.id) {
+    if (user.userId === userId || user.name?.toLowerCase() === name?.toLowerCase()) {
       connectedUsers.delete(sid);
     }
   }
 
   connectedUsers.set(socket.id, { userId, name, socketId: socket.id });
-  console.log(`✅ Connecté : ${name} — ${connectedUsers.size} en ligne`);
-  io.emit("user_online", { name, online: true });
 
-  // ✅ Livrer les messages en attente dès la reconnexion
-  if (pendingMessages[name]?.length > 0) {
-    console.log(`📬 Livraison de ${pendingMessages[name].length} msg(s) en attente pour ${name}`);
-    pendingMessages[name].forEach((item) => {
-      socket.emit("message", item.payload);
-      socket.emit("notification", {
-        id: Date.now(), type: "message",
-        msg: `💬 Nouveau message de ${item.payload.from}`,
-        from: item.payload.from, time: "À l'instant", read: false,
-      });
-    });
-    delete pendingMessages[name];
-  }
+  const allNames = [];
+  connectedUsers.forEach(u => allNames.push(u.name));
+  console.log(`Connecte: "${name}" | En ligne: [${allNames.join(", ")}]`);
 
-  // ── Réception d'un message ────────────────────────────────
+  io.emit("user_online", { name, userId, online: true });
+
   socket.on("message", (data) => {
     const { to, ...msgData } = data;
     const time    = new Date().toLocaleTimeString("fr", { hour:"2-digit", minute:"2-digit" });
@@ -77,57 +70,51 @@ io.on("connection", (socket) => {
     const payload = { ...msgData, id, from, time };
 
     const destSocketId = findSocket(to);
+    console.log(`Message: "${from}" -> "${to}" | Dest socket: ${destSocketId || "INTROUVABLE"}`);
+
     if (destSocketId) {
       io.to(destSocketId).emit("message", payload);
       socket.emit("msg_status", { msgId: id, status: "delivered" });
       io.to(destSocketId).emit("notification", {
         id: Date.now(), type: "message",
-        msg: `💬 Nouveau message de ${from}`,
-        from, time: "À l'instant", read: false,
+        msg: `Nouveau message de ${from}`,
+        from, time: "A l'instant", read: false,
       });
     } else {
-      // ✅ Mettre en file si destinataire hors ligne → livré à la reconnexion
-      if (!pendingMessages[to]) pendingMessages[to] = [];
-      pendingMessages[to].push({ payload, from });
       socket.emit("msg_status", { msgId: id, status: "sent" });
-      console.log(`📭 ${to} hors ligne — message en attente (${pendingMessages[to].length} en file)`);
+      console.log(`  Hors ligne. Connectes: [${allNames.join(", ")}]`);
     }
-
-    console.log(`💬 ${from} → ${to} : ${msgData.text?.slice(0,40) || "(fichier)"}`);
   });
 
-  // ── Nouvelle offre → broadcast à tous ─────────────────────
-  socket.on("new_job", (job) => {
-    console.log(`📢 Nouvelle offre de ${name} : ${job.title}`);
-    socket.broadcast.emit("new_job", job);
-  });
-
-  // ── Statut message ─────────────────────────────────────────
   socket.on("msg_status", ({ msgId, status, to }) => {
     const dest = findSocket(to);
     if (dest) io.to(dest).emit("msg_status", { msgId, status });
   });
 
-  // ✅ FIX 1 — Renvoyer la liste de tous les connectés
-  socket.on("get_online_list", () => {
-    const names = [...connectedUsers.values()].map(u => u.name);
-    socket.emit("online_list", names);
+  // ✅ Nouvelles offres → broadcast à tous
+  socket.on("new_job", (job) => {
+    console.log(`📢 Nouvelle offre de ${name}: ${job.title}`);
+    socket.broadcast.emit("new_job", job);
   });
 
-  // ── Typing indicator ───────────────────────────────────────
+  // ✅ Marquer messages comme lus → notifier l'expéditeur
+  socket.on("msg_read", ({ to }) => {
+    const dest = findSocket(to);
+    if (dest) io.to(dest).emit("msg_read", { from: name });
+  });
+
   socket.on("typing", ({ to, typing }) => {
     const dest = findSocket(to);
     if (dest) io.to(dest).emit("typing", { from: name, typing });
   });
 
-  // ── Déconnexion ────────────────────────────────────────────
   socket.on("disconnect", () => {
     connectedUsers.delete(socket.id);
-    io.emit("user_online", { name, online: false });
-    console.log(`❌ Déconnecté : ${name} — ${connectedUsers.size} en ligne`);
+    io.emit("user_online", { name, userId, online: false });
+    console.log(`Deconnecte: "${name}" | Restants: ${connectedUsers.size}`);
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`\n🚀 Serveur démarré sur http://localhost:${PORT}\n`);
+  console.log(`Serveur demarre sur port ${PORT}`);
 });
