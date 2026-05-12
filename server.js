@@ -91,21 +91,15 @@ io.on("connection", (socket) => {
     if (dest) io.to(dest).emit("msg_status", { msgId, status });
   });
 
-  // ✅ Nouvelles offres → broadcast à tous
-  socket.on("new_job", (job) => {
-    console.log(`📢 Nouvelle offre de ${name}: ${job.title}`);
-    socket.broadcast.emit("new_job", job);
-  });
-
-  // ✅ Marquer messages comme lus → notifier l'expéditeur
-  socket.on("msg_read", ({ to }) => {
-    const dest = findSocket(to);
-    if (dest) io.to(dest).emit("msg_read", { from: name });
-  });
-
   socket.on("typing", ({ to, typing }) => {
     const dest = findSocket(to);
     if (dest) io.to(dest).emit("typing", { from: name, typing });
+  });
+
+  // Nouvelle offre — diffuser à tous sauf l'auteur
+  socket.on("new_job", ({ job, notification }) => {
+    console.log(`💼 Nouvelle offre de "${name}" : ${job.title}`);
+    socket.broadcast.emit("new_job", { job, notification });
   });
 
   socket.on("disconnect", () => {
